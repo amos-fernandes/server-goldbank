@@ -1,8 +1,8 @@
 {
   "name": "goldbank-server",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "private": true,
-  "description": "GoldBank API Server — Express + JWT + GTK Integration",
+  "description": "GoldBank API Server — Express + JWT + GTK Integration + Asaas Subaccounts",
   "main": "serve.js",
   "scripts": {
     "start": "node serve.js",
@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "axios": "^1.16.1",
+    "bcryptjs": "2.4.3",
     "dotenv": "^17.4.2",
     "express": "^4.19.2",
     "express-rate-limit": "^7.4.1",
