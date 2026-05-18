@@ -1,0 +1,21 @@
+{
+  "users": [
+    {
+      "id": "cus_mock_1778854737876",
+      "name": "Test User",
+      "email": "test@goldbank.com.br",
+      "asaasStatus": "ACTIVE",
+      "walletId": "9a125b4c-85a7-4ed0-a1f4-c7aa945716f1",
+      "token": "d21abb9c5a7dc1bffb05d821e66879b07d01a22519e8a4ef70adddb1257ba7a6"
+    },
+    {
+      "id": "cus_000176447219",
+      "name": "Amós Fernandes ",
+      "email": "amoxx@outlook.com",
+      "asaasStatus": "ACTIVE",
+      "walletId": "9a125b4c-85a7-4ed0-a1f4-c7aa945716f1",
+      "token": "267e8329b0e102323b4ae30899d9d7043c542f0afb0bd5f1f2100af7802916c5"
+    }
+  ],
+  "transactions": []
+}
