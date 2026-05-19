@@ -133,6 +133,10 @@ function makeSubAsaas(encryptedApiKey) {
 // ─── APP ─────────────────────────────────────────────────────────────────────
 const app = express();
 
+// Render (e qualquer PaaS) senta atrás de um reverse proxy.
+// Sem isso o express-rate-limit rejeita X-Forwarded-For com ValidationError.
+app.set('trust proxy', 1);
+
 app.use(helmet());
 app.use(express.json({ limit: '1mb' }));
 
@@ -563,6 +567,11 @@ app.get('/health', (req, res) => {
 app.use((req, res) => res.status(404).json({ error: 'Not Found' }));
 
 // ─── START ───────────────────────────────────────────────────────────────────
+if (!DATABASE_URL) {
+  console.error('[FATAL] DATABASE_URL não definida. Configure a variável de ambiente no painel do Render.');
+  process.exit(1);
+}
+
 initDb()
   .then(() => {
     app.listen(PORT, '0.0.0.0', () => {
@@ -570,6 +579,6 @@ initDb()
     });
   })
   .catch(err => {
-    console.error('[FATAL] Falha ao conectar no banco de dados:', err.message);
+    console.error('[FATAL] Falha ao conectar no banco de dados:', err.message, err.stack);
     process.exit(1);
   });
