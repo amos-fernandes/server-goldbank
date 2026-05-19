@@ -1,18 +1,17 @@
 'use strict';
 /**
  * GoldBank API Server v3.0
- * Express + JWT + bcrypt + Asaas Subaccounts (wallet por usuário) + GTK Integration
+ * Express + JWT + bcrypt + PostgreSQL + Asaas Subaccounts + GTK Integration
  * Repo: github.com/amos-fernandes/server-goldbank
  */
 const express = require('express');
 const axios = require('axios');
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
-const fs = require('fs');
-const path = require('path');
 const jwt = require('jsonwebtoken');
 const rateLimit = require('express-rate-limit');
 const helmet = require('helmet');
+const { Pool } = require('pg');
 require('dotenv').config({ path: '.env.private' });
 
 const {
@@ -25,28 +24,60 @@ const {
   PORT = 8082,
   NODE_ENV = 'development',
   ALLOWED_ORIGINS = 'http://localhost:8081,exp://localhost:8081,http://localhost:3000',
+  DATABASE_URL,
 } = process.env;
 
-// ─── DB (JSON — migrar para Cloud SQL em produção) ───────────────────────────
-const DB_PATH = path.join(__dirname, 'db.json');
+// ─── BANCO DE DADOS (PostgreSQL) ─────────────────────────────────────────────
+const pool = new Pool({
+  connectionString: DATABASE_URL,
+  ssl: NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+});
 
-function loadDb() {
-  try {
-    if (fs.existsSync(DB_PATH)) return JSON.parse(fs.readFileSync(DB_PATH, 'utf-8'));
-  } catch (e) { console.error('[DB]', e.message); }
-  return { users: [], transactions: [] };
+async function initDb() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS users (
+      id                  TEXT PRIMARY KEY,
+      name                TEXT NOT NULL,
+      email               TEXT UNIQUE NOT NULL,
+      password_hash       TEXT,
+      asaas_account_id    TEXT,
+      asaas_wallet_id     TEXT,
+      asaas_api_key       TEXT,
+      asaas_customer_id   TEXT,
+      asaas_status        TEXT DEFAULT 'PENDING',
+      wallet_address      TEXT,
+      mb_credentials_data TEXT,
+      mb_credentials_iv   TEXT,
+      last_login_at       TIMESTAMPTZ,
+      created_at          TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  console.log('[DB] Tabelas prontas.');
 }
 
-function saveDb(data) {
-  fs.writeFileSync(DB_PATH, JSON.stringify(data, null, 2));
+// Converte row do PostgreSQL para objeto JS camelCase
+function rowToUser(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    name: row.name,
+    email: row.email,
+    passwordHash: row.password_hash,
+    asaasAccountId: row.asaas_account_id,
+    asaasWalletId: row.asaas_wallet_id,
+    asaasApiKey: row.asaas_api_key,
+    asaasCustomerId: row.asaas_customer_id,
+    asaasStatus: row.asaas_status,
+    walletAddress: row.wallet_address,
+    mbCredentials: row.mb_credentials_data
+      ? { data: row.mb_credentials_data, iv: row.mb_credentials_iv }
+      : undefined,
+    lastLoginAt: row.last_login_at,
+    createdAt: row.created_at,
+  };
 }
-
-let db = loadDb();
 
 // ─── HELPERS DE SEGURANÇA ────────────────────────────────────────────────────
-
-// Criptografa strings sensíveis (asaasApiKey) antes de salvar no db.json.
-// Em dev sem ENCRYPTION_KEY, armazena em plain text — nunca faça isso em prod.
 function encrypt(text) {
   if (!ENCRYPTION_KEY || ENCRYPTION_KEY.length !== 64) return text;
   const iv = crypto.randomBytes(16);
@@ -65,13 +96,11 @@ function decrypt(text) {
   return dec;
 }
 
-// Nunca expõe passwordHash nem asaasApiKey ao cliente.
 function safeUser(user) {
-  const { passwordHash, asaasApiKey, ...safe } = user;
+  const { passwordHash, asaasApiKey, mbCredentials, ...safe } = user;
   return safe;
 }
 
-// Normaliza o status da subconta Asaas para o tipo do mobile: PENDING | ACTIVE | REJECTED
 function mapAccountStatus(raw) {
   const s = typeof raw === 'object' ? raw?.status : raw;
   if (s === 'ACTIVE' || s === 'APPROVED') return 'ACTIVE';
@@ -80,8 +109,6 @@ function mapAccountStatus(raw) {
 }
 
 // ─── CLIENTES AXIOS ──────────────────────────────────────────────────────────
-
-// Conta mestre — usada apenas para criar subcontas (POST /accounts)
 const asaas = axios.create({
   baseURL: ASAAS_BASE_URL,
   headers: { access_token: ASAAS_API_KEY, 'Content-Type': 'application/json' },
@@ -94,9 +121,6 @@ const gtkApi = axios.create({
   timeout: 8000,
 });
 
-// Cria uma instância Asaas autenticada com a apiKey da subconta do usuário.
-// Todas as operações financeiras (saldo, PIX, cobranças) usam essa instância,
-// garantindo isolamento total de wallet entre usuários.
 function makeSubAsaas(encryptedApiKey) {
   const key = decrypt(encryptedApiKey);
   return axios.create({
@@ -112,7 +136,6 @@ const app = express();
 app.use(helmet());
 app.use(express.json({ limit: '1mb' }));
 
-// HTTPS redirect em produção (Cloud Run usa x-forwarded-proto)
 app.use((req, res, next) => {
   if (NODE_ENV === 'production' && req.headers['x-forwarded-proto'] !== 'https') {
     return res.redirect(301, `https://${req.headers.host}${req.url}`);
@@ -120,7 +143,6 @@ app.use((req, res, next) => {
   next();
 });
 
-// CORS — apenas origens autorizadas
 const allowedOrigins = ALLOWED_ORIGINS.split(',').map(o => o.trim());
 app.use((req, res, next) => {
   const origin = req.headers.origin;
@@ -136,7 +158,6 @@ app.use((req, res, next) => {
   next();
 });
 
-// Rate limiting global
 app.use(rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 100,
@@ -145,7 +166,6 @@ app.use(rateLimit({
   message: { error: 'Muitas requisições. Tente novamente em 15 minutos.' },
 }));
 
-// Rate limiting rigoroso para login e registro
 app.use('/api/auth/login', rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 5,
@@ -173,13 +193,13 @@ function requireFingerprint(req, res, next) {
 }
 
 // ─── MIDDLEWARE: JWT Auth ─────────────────────────────────────────────────────
-function authenticateToken(req, res, next) {
+async function authenticateToken(req, res, next) {
   const auth = req.headers.authorization;
   if (!auth) return res.status(401).json({ error: 'Token não fornecido' });
   try {
     const decoded = jwt.verify(auth.replace('Bearer ', ''), JWT_SECRET);
-    db = loadDb();
-    const user = db.users.find(u => u.id === decoded.userId);
+    const { rows } = await pool.query('SELECT * FROM users WHERE id = $1', [decoded.userId]);
+    const user = rowToUser(rows[0]);
     if (!user) return res.status(401).json({ error: 'Sessão inválida' });
     req.user = user;
     next();
@@ -188,7 +208,6 @@ function authenticateToken(req, res, next) {
   }
 }
 
-// Guard para usuários criados antes da migração para subcontas (v3).
 function requireSubAccount(req, res, next) {
   if (!req.user.asaasApiKey) {
     return res.status(403).json({
@@ -203,8 +222,6 @@ function issueToken(userId, email) {
 }
 
 // ─── AUTH ─────────────────────────────────────────────────────────────────────
-
-// Cadastro — cria subconta Asaas real (wallet própria por usuário)
 app.post('/api/auth/register', async (req, res) => {
   const {
     name, email, cpfCnpj, phone, birthDate,
@@ -218,23 +235,23 @@ app.post('/api/auth/register', async (req, res) => {
     return res.status(400).json({ error: 'Senha deve ter no mínimo 8 caracteres.' });
   }
 
-  db = loadDb();
-  if (db.users.find(u => u.email === email.toLowerCase().trim())) {
+  const normalizedEmail = email.toLowerCase().trim();
+  const { rows: existing } = await pool.query('SELECT id FROM users WHERE email = $1', [normalizedEmail]);
+  if (existing.length > 0) {
     return res.status(409).json({ error: 'E-mail já cadastrado.' });
   }
 
   const cleanCpf = cpfCnpj.replace(/\D/g, '');
 
-  console.log('[ASAAS] Criando subconta para:', email);
+  console.log('[ASAAS] Criando subconta para:', normalizedEmail);
 
   try {
-    // 1. Criar subconta Asaas (wallet própria, chave PIX, saldo isolado)
     const { data: account } = await asaas.post('/accounts', {
       name,
       email,
       cpfCnpj: cleanCpf,
       mobilePhone: phone.replace(/\D/g, ''),
-      birthDate,                                        // YYYY-MM-DD
+      birthDate,
       address,
       addressNumber,
       complement: complement || undefined,
@@ -249,7 +266,6 @@ app.post('/api/auth/register', async (req, res) => {
 
     console.log(`[ASAAS] Subconta criada: ${account.id} | Wallet: ${account.walletId}`);
 
-    // 2. Criar customer dentro da subconta para vinculação de cobranças PIX
     const subAsaas = makeSubAsaas(account.apiKey);
     const { data: customer } = await subAsaas.post('/customers', {
       name,
@@ -261,29 +277,27 @@ app.post('/api/auth/register', async (req, res) => {
 
     console.log(`[ASAAS] Customer da subconta: ${customer.id}`);
 
-    // 3. Hash da senha
     const passwordHash = await bcrypt.hash(password, 12);
+    const encryptedApiKey = encrypt(account.apiKey);
+    const asaasStatus = mapAccountStatus(account.accountStatus);
 
-    // 4. Salvar usuário (apiKey da subconta criptografada)
-    const newUser = {
-      id: account.id,
-      name,
-      email: email.toLowerCase().trim(),
-      passwordHash,
-      asaasAccountId: account.id,
-      asaasWalletId: account.walletId,
-      asaasApiKey: encrypt(account.apiKey),
-      asaasCustomerId: customer.id,
-      asaasStatus: mapAccountStatus(account.accountStatus),
-    };
+    await pool.query(
+      `INSERT INTO users
+        (id, name, email, password_hash, asaas_account_id, asaas_wallet_id,
+         asaas_api_key, asaas_customer_id, asaas_status)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+      [account.id, name, normalizedEmail, passwordHash, account.id,
+       account.walletId, encryptedApiKey, customer.id, asaasStatus],
+    );
 
-    db.users.push(newUser);
-    saveDb(db);
+    const token = issueToken(account.id, normalizedEmail);
+    console.log(`[AUTH] Registro concluído: ${normalizedEmail}`);
 
-    const token = issueToken(account.id, newUser.email);
-    console.log(`[AUTH] Registro concluído: ${email}`);
-
-    res.status(201).json({ ...safeUser(newUser), walletId: account.walletId, token });
+    res.status(201).json({
+      id: account.id, name, email: normalizedEmail,
+      asaasAccountId: account.id, asaasWalletId: account.walletId,
+      asaasStatus, walletId: account.walletId, token,
+    });
   } catch (err) {
     const asaasMsg = err.response?.data?.errors?.[0]?.description;
     console.error('[ASAAS REGISTER ERROR]', err.response?.data || err.message);
@@ -297,13 +311,13 @@ app.post('/api/auth/login', async (req, res) => {
     return res.status(400).json({ error: 'Email e senha são obrigatórios.' });
   }
 
-  db = loadDb();
-  const user = db.users.find(u => u.email === email.toLowerCase().trim());
+  const { rows } = await pool.query('SELECT * FROM users WHERE email = $1', [email.toLowerCase().trim()]);
+  const user = rowToUser(rows[0]);
+
   if (!user) {
     return res.status(401).json({ error: 'Conta não encontrada. Verifique o e-mail.' });
   }
 
-  // Usuários legados (antes da v3) não têm passwordHash — senha não verificável
   if (!user.passwordHash) {
     return res.status(403).json({
       error: 'Sua conta foi criada antes da atualização de segurança. Por favor, registre-se novamente.',
@@ -315,12 +329,10 @@ app.post('/api/auth/login', async (req, res) => {
     return res.status(401).json({ error: 'Senha incorreta.' });
   }
 
-  const token = issueToken(user.id, user.email);
-  const idx = db.users.findIndex(u => u.id === user.id);
-  db.users[idx].lastLoginAt = new Date().toISOString();
-  saveDb(db);
+  await pool.query('UPDATE users SET last_login_at = NOW() WHERE id = $1', [user.id]);
 
-  console.log(`[AUTH] Login: ${email}`);
+  const token = issueToken(user.id, user.email);
+  console.log(`[AUTH] Login: ${user.email}`);
   res.json({ ...safeUser(user), walletId: user.asaasWalletId, token });
 });
 
@@ -329,8 +341,6 @@ app.get('/api/auth/me', authenticateToken, (req, res) => {
 });
 
 // ─── WALLET ───────────────────────────────────────────────────────────────────
-
-// Saldo da wallet individual do usuário (subconta Asaas)
 app.get('/api/wallet/balance', authenticateToken, requireSubAccount, async (req, res) => {
   try {
     const userAsaas = makeSubAsaas(req.user.asaasApiKey);
@@ -347,7 +357,6 @@ app.get('/api/wallet/balance', authenticateToken, requireSubAccount, async (req,
   }
 });
 
-// Gera cobrança PIX na subconta do usuário
 app.post('/api/pix/deposit', authenticateToken, requireSubAccount, requireFingerprint, async (req, res) => {
   const { amount, description } = req.body;
   if (!amount || amount < 1) {
@@ -358,7 +367,6 @@ app.post('/api/pix/deposit', authenticateToken, requireSubAccount, requireFinger
 
   try {
     const userAsaas = makeSubAsaas(req.user.asaasApiKey);
-
     const { data: payment } = await userAsaas.post('/payments', {
       customer: req.user.asaasCustomerId,
       billingType: 'PIX',
@@ -382,7 +390,6 @@ app.post('/api/pix/deposit', authenticateToken, requireSubAccount, requireFinger
   }
 });
 
-// Extrato de transações da subconta do usuário
 app.get('/api/wallet/transactions', authenticateToken, requireSubAccount, async (req, res) => {
   try {
     const userAsaas = makeSubAsaas(req.user.asaasApiKey);
@@ -404,7 +411,6 @@ app.get('/api/wallet/transactions', authenticateToken, requireSubAccount, async 
   }
 });
 
-// Resumo do dashboard — usa saldo real da subconta
 app.get('/api/dashboard/summary', authenticateToken, requireSubAccount, async (req, res) => {
   try {
     const userAsaas = makeSubAsaas(req.user.asaasApiKey);
@@ -456,19 +462,19 @@ app.post('/api/crypto/buy', authenticateToken, requireFingerprint, (req, res) =>
 });
 
 // ─── USER ────────────────────────────────────────────────────────────────────
-app.post('/api/user/mb-credentials', authenticateToken, (req, res) => {
+app.post('/api/user/mb-credentials', authenticateToken, async (req, res) => {
   if (!ENCRYPTION_KEY || ENCRYPTION_KEY.length !== 64) {
     return res.status(500).json({ error: 'Servidor não configurado para criptografia.' });
   }
-  db = loadDb();
-  const idx = db.users.findIndex(u => u.id === req.user.id);
-  if (idx === -1) return res.status(404).json({ error: 'Usuário não encontrado.' });
   const iv = crypto.randomBytes(16);
   const cipher = crypto.createCipheriv('aes-256-cbc', Buffer.from(ENCRYPTION_KEY, 'hex'), iv);
   let encrypted = cipher.update(JSON.stringify(req.body), 'utf-8', 'hex');
   encrypted += cipher.final('hex');
-  db.users[idx].mbCredentials = { data: encrypted, iv: iv.toString('hex') };
-  saveDb(db);
+
+  await pool.query(
+    'UPDATE users SET mb_credentials_data = $1, mb_credentials_iv = $2 WHERE id = $3',
+    [encrypted, iv.toString('hex'), req.user.id],
+  );
   res.json({ success: true });
 });
 
@@ -542,7 +548,6 @@ app.post('/api/security/verify-integrity', authenticateToken, async (req, res) =
       const verdict = data.tokenPayloadExternal?.appIntegrity?.appRecognitionVerdict;
       return res.json({ isValid: verdict === 'PLAY_RECOGNIZED', verdict });
     }
-    // iOS App Attest — em breve
     res.json({ isValid: true, message: 'iOS attestation — em breve.' });
   } catch (err) {
     console.error('[INTEGRITY]', err.message);
@@ -557,6 +562,14 @@ app.get('/health', (req, res) => {
 
 app.use((req, res) => res.status(404).json({ error: 'Not Found' }));
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`\n💎 GoldBank API v3.0 [${NODE_ENV}] → porta ${PORT} 💎\n`);
-});
+// ─── START ───────────────────────────────────────────────────────────────────
+initDb()
+  .then(() => {
+    app.listen(PORT, '0.0.0.0', () => {
+      console.log(`\n💎 GoldBank API v3.0 [${NODE_ENV}] → porta ${PORT} 💎\n`);
+    });
+  })
+  .catch(err => {
+    console.error('[FATAL] Falha ao conectar no banco de dados:', err.message);
+    process.exit(1);
+  });
