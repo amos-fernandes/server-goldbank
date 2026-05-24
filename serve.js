@@ -17,6 +17,7 @@ require('dotenv').config({ path: '.env.private' });
 const {
   ASAAS_API_KEY,
   ASAAS_BASE_URL = 'https://api.asaas.com/v3',
+  ASAAS_WEBHOOK_TOKEN,           // Token de autenticação cadastrado no painel Asaas
   ENCRYPTION_KEY,
   JWT_SECRET = 'dev-secret-CHANGE-IN-PROD',
   GTK_API_URL = 'https://api.gtk.bank',
@@ -557,6 +558,95 @@ app.post('/api/security/verify-integrity', authenticateToken, async (req, res) =
     console.error('[INTEGRITY]', err.message);
     res.status(500).json({ isValid: false, error: 'Erro na verificação.' });
   }
+});
+
+// ─── WEBHOOK: Validação de Saque (Asaas pergunta: "posso liberar?") ──────────
+// Asaas chama este endpoint ANTES de processar qualquer saque da conta
+// Deve responder em até 10s — se não responder, Asaas NEGA o saque por padrão
+app.post('/api/pix/withdraw/validate', async (req, res) => {
+  // 1. Validar IP do Asaas
+  if (!isAsaasIP(req)) {
+    console.warn('[WITHDRAW-VALIDATE] IP não autorizado:', req.headers['x-forwarded-for'] || req.socket.remoteAddress);
+    return res.status(403).json({ authorized: false });
+  }
+
+  // 2. Validar token de autenticação (se configurado no painel Asaas)
+  const token = req.headers['asaas-access-token'] || req.body?.accessToken;
+  if (ASAAS_WEBHOOK_TOKEN && token !== ASAAS_WEBHOOK_TOKEN) {
+    console.warn('[WITHDRAW-VALIDATE] Token inválido');
+    return res.status(401).json({ authorized: false });
+  }
+
+  const { id, value, type, walletId, description } = req.body;
+  console.log(`[WITHDRAW-VALIDATE] Saque solicitado: R$${value} | Tipo: ${type} | ID: ${id}`);
+
+  // 3. Regras de negócio — ajuste conforme necessário
+  try {
+    // Negar saques acima de R$ 50.000 sem revisão manual
+    if (value > 50000) {
+      console.warn(`[WITHDRAW-VALIDATE] ❌ Valor acima do limite: R$${value}`);
+      return res.json({ authorized: false, reason: 'Valor acima do limite automático. Contate o suporte.' });
+    }
+
+    // Verificar horário (bloquear madrugada 23h–6h como proteção antifraude)
+    const hour = new Date().getHours(); // UTC — Brasília = UTC-3
+    const hourBR = (hour - 3 + 24) % 24;
+    if (hourBR >= 23 || hourBR < 6) {
+      console.warn(`[WITHDRAW-VALIDATE] ❌ Fora do horário permitido: ${hourBR}h`);
+      return res.json({ authorized: false, reason: 'Saques não permitidos entre 23h e 6h (horário de Brasília).' });
+    }
+
+    // Autorizar
+    console.log(`[WITHDRAW-VALIDATE] ✅ Autorizado: R$${value}`);
+    res.json({ authorized: true });
+
+  } catch (err) {
+    console.error('[WITHDRAW-VALIDATE] Erro interno:', err.message);
+    // Em caso de erro interno, NEGAR por segurança
+    res.json({ authorized: false, reason: 'Erro interno. Tente novamente.' });
+  }
+});
+
+// ─── WEBHOOK ASAAS ───────────────────────────────────────────────────────────
+// IPs oficiais Asaas: 177.153.18.0/24 e 177.153.19.0/24
+const ASAAS_IPS = ['177.153.18.', '177.153.19.'];
+
+function isAsaasIP(req) {
+  if (NODE_ENV !== 'production') return true; // libera em dev
+  const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
+  return ASAAS_IPS.some(prefix => ip.startsWith(prefix));
+}
+
+app.post('/api/pix/webhook', async (req, res) => {
+  if (!isAsaasIP(req)) {
+    console.warn('[WEBHOOK] IP não autorizado:', req.headers['x-forwarded-for'] || req.socket.remoteAddress);
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
+  const { event, payment } = req.body;
+  console.log(`[WEBHOOK] Evento: ${event} | Cobrança: ${payment?.id} | Status: ${payment?.status}`);
+
+  // Pagamento confirmado
+  if (event === 'PAYMENT_RECEIVED' || event === 'PAYMENT_CONFIRMED') {
+    try {
+      // Registrar pagamento confirmado no banco para auditoria
+      await pool.query(
+        `INSERT INTO transactions (id, user_id, type, category, amount_brl, description, status, asaas_charge_id)
+         VALUES ($1,
+           (SELECT id FROM users WHERE asaas_customer_id = $2 LIMIT 1),
+           'INFLOW', 'Depósito PIX', $3, 'Depósito via PIX confirmado', 'COMPLETED', $1)
+         ON CONFLICT (id) DO UPDATE SET status = 'COMPLETED'`,
+        [payment.id, payment.customer, payment.value]
+      ).catch(e => console.warn('[WEBHOOK] DB insert ignorado:', e.message));
+
+      console.log(`[WEBHOOK] ✅ Depósito confirmado: R$ ${payment.value} | ID: ${payment.id}`);
+    } catch (e) {
+      console.error('[WEBHOOK] Erro ao processar:', e.message);
+    }
+  }
+
+  // Asaas espera 200 imediatamente, independente do processamento
+  res.status(200).json({ received: true });
 });
 
 // ─── HEALTH ──────────────────────────────────────────────────────────────────
