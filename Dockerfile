@@ -5,7 +5,6 @@ COPY package*.json ./
 RUN npm ci --only=production && npm cache clean --force
 
 COPY serve.js ./
-COPY templates/ ./templates/
 
 EXPOSE 8082
 

@@ -1,12 +1,13 @@
 {
-  "name": "goldbank-server",
+  "name": "aibank-server",
   "version": "3.0.0",
   "private": true,
-  "description": "GoldBank API Server — Express + JWT + GTK Integration + Asaas Subaccounts",
+  "description": "AIBANK API Server — Express + JWT + NECTAco/Azify + GTK Integration",
   "main": "serve.js",
   "scripts": {
     "start": "node serve.js",
-    "dev": "node --watch serve.js"
+    "dev": "node --watch serve.js",
+    "test": "NODE_ENV=test jest --forceExit --detectOpenHandles"
   },
   "engines": {
     "node": ">=20"
@@ -15,10 +16,16 @@
     "axios": "^1.16.1",
     "bcryptjs": "2.4.3",
     "dotenv": "^17.4.2",
+    "ethers": "^6.13.0",
     "express": "^4.19.2",
     "express-rate-limit": "^7.4.1",
+    "form-data": "^4.0.0",
     "helmet": "^8.0.0",
     "jsonwebtoken": "^9.0.2",
     "pg": "^8.21.0"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "supertest": "^6.3.0"
   }
 }
