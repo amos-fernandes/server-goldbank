@@ -28,6 +28,7 @@ const {
   JWT_SECRET = 'dev-secret-CHANGE-IN-PROD',
   GTK_API_URL = 'https://gtk-api-529742420922.southamerica-east1.run.app',
   GTK_API_KEY,
+  CREDIT_ENGINE_URL = 'http://localhost:8000',
   PORT = 8082,
   NODE_ENV = 'development',
   ALLOWED_ORIGINS = 'http://localhost:8081,exp://localhost:8081,http://localhost:19006,http://localhost:3000',
@@ -234,6 +235,12 @@ const gtkApi = axios.create({
   baseURL: GTK_API_URL,
   headers: { 'x-api-key': GTK_API_KEY, 'Content-Type': 'application/json' },
   timeout: 8000,
+});
+
+const creditEngine = axios.create({
+  baseURL: CREDIT_ENGINE_URL,
+  headers: { 'Content-Type': 'application/json' },
+  timeout: 30000,
 });
 
 // ─── PROVEDOR PIX ABSTRATO (Necta primary + Azify fallback) ───────────────────
@@ -1147,6 +1154,114 @@ app.post('/api/pix/webhook', async (req, res) => {
   }
 });
 
+// ─── CRÉTIDO (Node.js proxy → Python Credit Engine) ──────────────────────────
+app.post('/api/credit/analyze', authenticateToken, async (req, res) => {
+  try {
+    const { customer_id, lookback_days = 180 } = req.body;
+    const cid = customer_id || req.user.id;
+
+    // Usuário demo: retorna mock de crédito
+    if (isDemoUser(req.user)) {
+      return res.json({
+        customer_id: cid,
+        score: 720,
+        probability_of_default: 0.12,
+        decision: 'approve',
+        suggested_credit_limit: 15000.00,
+        reasons: ['conta_estabelecida', 'alto_volume_transacional', 'entradas_regulares'],
+        model_version: 'demo-v1.0.0',
+        generated_at: new Date().toISOString(),
+        lstm_risk_score: 0.18,
+        scorecard_score: 720,
+      });
+    }
+
+    const response = await creditEngine.post('/credit/analyze', {
+      customer_id: cid,
+      lookback_days,
+    });
+    res.json(response.data);
+  } catch (err) {
+    console.error('[CREDIT ANALYZE ERROR]', err.response?.data || err.message);
+    res.status(502).json({ error: 'Erro ao consultar motor de crédito.', detail: err.response?.data || err.message });
+  }
+});
+
+app.get('/api/credit/status', authenticateToken, async (req, res) => {
+  try {
+    if (isDemoUser(req.user)) {
+      return res.json({
+        customer_id: req.user.id,
+        status: 'APPROVED',
+        score: 720,
+        decision: 'approve',
+        approved_limit: 15000.00,
+        available_limit: 15000.00,
+        reasons: [],
+        analyzed_at: new Date().toISOString(),
+        expires_at: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+      });
+    }
+
+    const response = await creditEngine.get(`/credit/status/${req.user.id}`);
+    res.json(response.data);
+  } catch (err) {
+    console.error('[CREDIT STATUS ERROR]', err.response?.data || err.message);
+    res.json({ customer_id: req.user.id, status: 'NOT_STARTED' });
+  }
+});
+
+app.get('/api/credit/limit', authenticateToken, async (req, res) => {
+  try {
+    if (isDemoUser(req.user)) {
+      return res.json({
+        customer_id: req.user.id,
+        approved_limit: 15000.00,
+        available_limit: 15000.00,
+        used_limit: 0.00,
+        status: 'APPROVED',
+      });
+    }
+
+    const response = await creditEngine.get(`/credit/limit/${req.user.id}`);
+    res.json(response.data);
+  } catch (err) {
+    console.error('[CREDIT LIMIT ERROR]', err.response?.data || err.message);
+    res.json({ customer_id: req.user.id, approved_limit: 0, available_limit: 0, used_limit: 0, status: 'NOT_STARTED' });
+  }
+});
+
+app.post('/api/credit/simulate', authenticateToken, async (req, res) => {
+  try {
+    const { amount, installments = 12, monthly_rate = 0.0199 } = req.body;
+
+    if (!amount || amount <= 0) return res.status(400).json({ error: 'Valor inválido.' });
+
+    // Simulação local (Tabela Price) — rápido, sem chamar Python
+    const n = installments;
+    const r = monthly_rate;
+    const installment_value = r > 0
+      ? amount * (r * Math.pow(1 + r, n)) / (Math.pow(1 + r, n) - 1)
+      : amount / n;
+    const total_cost = installment_value * n;
+    const total_interest = total_cost - amount;
+    const effective_annual = (Math.pow(1 + r, 12) - 1) * 100;
+
+    res.json({
+      amount,
+      installments: n,
+      monthly_rate: r,
+      installment_value: Math.round(installment_value * 100) / 100,
+      total_cost: Math.round(total_cost * 100) / 100,
+      total_interest: Math.round(total_interest * 100) / 100,
+      effective_annual_rate: Math.round(effective_annual * 100) / 100,
+    });
+  } catch (err) {
+    console.error('[CREDIT SIMULATE ERROR]', err.message);
+    res.status(500).json({ error: 'Erro na simulação.' });
+  }
+});
+
 // ─── SECURITY ────────────────────────────────────────────────────────────────
 app.post('/api/security/verify-integrity', authenticateToken, async (req, res) => {
   const { token: integrityToken, platform } = req.body;
@@ -1182,4 +1297,4 @@ if (NODE_ENV !== 'test') {
     });
 }
 
-module.exports = { app, necta, azify, gtkApi };
+module.exports = { app, necta, azify, gtkApi, creditEngine };
