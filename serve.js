@@ -82,7 +82,8 @@ async function initDb() {
 }
 
 async function findUserByEmail(email) {
-  const key = email.toLowerCase();
+  const key = (email || '').toLowerCase();
+  if (key === 'demo@aibank.com.br') return DEMO_USER;
   if (!USE_DB) {
     for (const u of inMemoryUsers.values()) {
       if (u.email === key) return u;
@@ -94,6 +95,7 @@ async function findUserByEmail(email) {
 }
 
 async function findUserById(id) {
+  if (id === 'cus_demo_001') return DEMO_USER;
   if (!USE_DB) {
     return inMemoryUsers.get(id) || null;
   }
@@ -432,7 +434,7 @@ const pixProvider = new PixProvider();
 // ─── APP ─────────────────────────────────────────────────────────────────────
 const app = express();
 app.set('trust proxy', 1);
-app.use(helmet());
+app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
 app.use(express.json({ limit: '25mb' }));
 
 app.use((req, res, next) => {
@@ -442,22 +444,23 @@ app.use((req, res, next) => {
   next();
 });
 
-const allowedOrigins = ALLOWED_ORIGINS.split(',').map(o => o.trim());
+const allowedOrigins = (ALLOWED_ORIGINS || '').split(',').map(o => o.trim());
 app.use((req, res, next) => {
   const origin = req.headers.origin;
-  if (!origin || allowedOrigins.includes(origin)) {
-    if (origin) res.setHeader('Access-Control-Allow-Origin', origin);
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
+  const isAllowed = !origin || NODE_ENV !== 'production' || allowedOrigins.includes(origin);
+  if (isAllowed) {
+    res.setHeader('Access-Control-Allow-Origin', origin || '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', [
       'Content-Type', 'Authorization',
-      'X-Request-Timestamp', 'X-App-Platform', 'X-App-Version',
+      'X-Request-Timestamp', 'X-App-Platform', 'X-App-Version', 'x-demo-mode',
     ].join(', '));
   }
   if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
 });
 
-app.use(rateLimit({
+if (NODE_ENV === 'production') app.use(rateLimit({
   windowMs: 15 * 60 * 1000, max: 100,
   standardHeaders: true, legacyHeaders: false,
   message: { error: 'Muitas requisições. Tente novamente em 15 minutos.' },
@@ -575,7 +578,12 @@ const DEMO_CRYPTO_PRICES_BINANCE = [
   { symbol: 'ADAUSDT', price: 0.76 },
 ];
 
-function isDemoUser(userId) { return userId === DEMO_USER.id; }
+function isDemoUser(userOrId) {
+  if (!userOrId) return false;
+  if (typeof userOrId === 'object') return userOrId.id === DEMO_USER.id || userOrId.email === DEMO_EMAIL;
+  return userOrId === DEMO_USER.id || userOrId === DEMO_EMAIL;
+}
+inMemoryUsers.set(DEMO_USER.id, DEMO_USER);
 function isDemoEmail(email) { return email && email.toLowerCase() === DEMO_EMAIL; }
 function demoQrPayload(amount) {
   const ts = Date.now();
