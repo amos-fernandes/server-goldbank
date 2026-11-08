@@ -1,0 +1,10 @@
+const fs = require('fs');
+const zlib = require('zlib');
+const path = require('path');
+const b64Path = path.join(__dirname, 'serve.js.gz.b64');
+const outPath = path.join(__dirname, '..', 'serve.js');
+const b64 = fs.readFileSync(b64Path, 'utf8').replace(/\s+/g, '');
+const gz = Buffer.from(b64, 'base64');
+const js = zlib.gunzipSync(gz);
+fs.writeFileSync(outPath, js);
+console.log('[inflate] serve.js restored', js.length, 'bytes');
