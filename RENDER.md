@@ -1,85 +1,100 @@
 # Deploy no Render — server-goldbank (modo DEMO)
 
-Serviço atual: **https://server-goldbank.onrender.com**  
+Serviço: **https://server-goldbank.onrender.com**  
 Repo: **https://github.com/amos-fernandes/server-goldbank**
 
-## Objetivo temporário
+## ⚠️ Restaurar serve.js (obrigatório uma vez)
 
-- **Sem** Necta e **sem** Azify  
-- Conta **demo** + demais rotas (auth, wallet mock, GTK se configurado, crypto prices, etc.)
+Um commit intermediário corrompeu `serve.js`. Restaure o arquivo bom e aplique o DEMO_MODE:
 
-## 1. No painel Render
+```bash
+git clone https://github.com/amos-fernandes/server-goldbank.git
+cd server-goldbank
 
-1. Abra o serviço **server-goldbank** (Web Service).
-2. **Settings → Build & Deploy**
-   - Repository: `amos-fernandes/server-goldbank`
-   - Branch: `main`
-   - Runtime: Node
-   - Build Command: `npm install`
-   - Start Command: `npm start`
-   - (Se usar Docker) Dockerfile na raiz já existe.
-3. **Environment** → adicione:
+# Restaura serve.js da versão boa (antes do placeholder)
+git show 0905081a07fb3031ae86e138e922638c59f4b437:serve.js > serve.js
+
+# Aplique o patch DEMO_MODE (bloco abaixo) ou peça ao Grok o arquivo completo
+# Depois:
+git add serve.js package.json RENDER.md .env.private.example
+git commit -m "restore serve.js + DEMO_MODE"
+git push origin main
+```
+
+### Patch mínimo DEMO_MODE (colar no serve.js)
+
+**1) No `process.env` destructuring, adicione `DEMO_MODE` e logo abaixo:**
+
+```js
+  DEMO_MODE,
+} = process.env;
+
+const IS_DEMO_MODE = String(DEMO_MODE || '').toLowerCase() === 'true'
+  || String(DEMO_MODE || '') === '1'
+  || (!process.env.NECTA_API_KEY && !process.env.AZIFY_API_KEY);
+if (IS_DEMO_MODE) {
+  console.log('[MODE] DEMO_MODE ativo — Necta/Azify desligados; conta demo e PIX mock');
+}
+```
+
+**2) No início de cada método do `PixProvider`, adicione early-return se `IS_DEMO_MODE`:**
+
+- `createPixDeposit` → retorna QR/link mock `provider: 'demo'`
+- `createPixTransfer` → `{ success:true, provider:'demo', status:'COMPLETED' }`
+- `getAccountBalance` → `{ balance: 12500.50, availableBalance: 12500.50 }`
+- `getTransactions` → lista mock de 2 lançamentos
+- `createCustomer` → customer local `cus_local_*`
+- `getKycStatus` → `{ status: 'APPROVED' }`
+
+A conta **demo@aibank.com.br** já existia no código (login sem validar senha).
+
+## Configurar o Render
+
+1. Serviço Web **server-goldbank**
+2. Build: `npm install` · Start: `npm start` · Branch: `main`
+3. **Environment:**
 
 | Key | Value |
 |-----|--------|
 | `DEMO_MODE` | `true` |
 | `NODE_ENV` | `production` |
 | `PORT` | `8082` |
-| `JWT_SECRET` | *(hex 64+ chars — gere um novo)* |
-| `ENCRYPTION_KEY` | *(hex 64 chars)* |
+| `JWT_SECRET` | *(hex longo)* |
+| `ENCRYPTION_KEY` | *(64 hex chars)* |
 | `ALLOWED_ORIGINS` | `https://server-goldbank.onrender.com,exp://localhost:8081,http://localhost:8081,http://localhost:19006` |
-| `GTK_API_URL` | `https://gtk-api-529742420922.southamerica-east1.run.app` *(opcional)* |
-| `GTK_API_KEY` | *(opcional)* |
 
-**Remova ou deixe vazias:** `NECTA_*`, `AZIFY_*`.
+**Remova** `NECTA_*` e `AZIFY_*` (ou deixe vazias).
 
-4. **Manual Deploy** → Deploy latest commit.
-
-Gerar secrets:
+Gere secrets:
 ```bash
 node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 node -e "console.log(require('crypto').randomBytes(64).toString('hex'))"
 ```
 
-## 2. Conta demo
+4. **Manual Deploy** após o push do `serve.js` restaurado.
+
+## Conta demo
 
 | Campo | Valor |
 |-------|--------|
 | Email | `demo@aibank.com.br` |
-| Senha | qualquer (login demo não valida senha) |
-| User id | `cus_demo_001` |
+| Senha | qualquer |
 
-No app mobile, login com esse e-mail.  
-Header opcional: `x-demo-mode: true` em algumas rotas de preço.
+## App mobile
 
-## 3. App mobile (`aibank-mobile`)
-
-No `.env`:
 ```env
 EXPO_PUBLIC_API_URL=https://server-goldbank.onrender.com
 ```
 
-## 4. Health check
+## Health
 
 ```bash
-curl https://server-goldbank.onrender.com/health
-# ou
-curl https://server-goldbank.onrender.com/api/health
+curl -s https://server-goldbank.onrender.com/health
+# Logs devem mostrar: [MODE] DEMO_MODE ativo
 ```
 
-Logs no Render devem mostrar:
-```
-[MODE] DEMO_MODE ativo — Necta/Azify desligados; conta demo e PIX mock
-```
+## Voltar Necta/Azify
 
-## 5. Voltar Necta/Azify depois
-
-1. Preencher `NECTA_*` / `AZIFY_*` no Environment.
-2. `DEMO_MODE=false` (ou remover).
-3. Redeploy.
-
-## Observações
-
-- Sem `DATABASE_URL` o server usa memória (usuários registrados somem no restart — ok para demo).
-- Free tier Render pode dormir; primeiro request pode demorar ~30s.
-- Não commite `.env.private` com secrets reais.
+1. Preencher `NECTA_*` / `AZIFY_*`
+2. `DEMO_MODE=false`
+3. Redeploy

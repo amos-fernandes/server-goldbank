@@ -5,9 +5,8 @@
   "description": "AIBANK API Server — Express + JWT + DEMO_MODE (sem Necta/Azify) + GTK",
   "main": "serve.js",
   "scripts": {
-    "prestart": "node scripts/inflate-serve.js",
     "start": "node serve.js",
-    "dev": "node scripts/inflate-serve.js && node --watch serve.js",
+    "dev": "node --watch serve.js",
     "test": "NODE_ENV=test jest --forceExit --detectOpenHandles"
   },
   "engines": {
